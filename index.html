@@ -164,4 +164,5 @@ const TABS=[['dash','Dashboard',tDash],['chart','Chart',tChart],['sigs','Signals
 function go(t){if(CH&&t!=='chart'){CH.chart.remove();CH=null}S.tab=t;document.querySelectorAll('#nav button').forEach(b=>b.classList.toggle('on',b.dataset.t===t));TABS.find(x=>x[0]===t)[2]()}
 $('#nav').innerHTML=TABS.map(x=>`<button data-t="${x[0]}" onclick="go('${x[0]}')">${x[1]}</button>`).join('');go('dash');
 </script><script src="ui.js"></script>
+<script src="fix.js"></script>
 </body></html>
