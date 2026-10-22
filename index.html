@@ -163,4 +163,5 @@ function exportJ(){const a=document.createElement('a');a.href=URL.createObjectUR
 const TABS=[['dash','Dashboard',tDash],['chart','Chart',tChart],['sigs','Signals',tSigs],['bt','Backtest',tBT],['jr','Journal',tJr],['set','Settings',tSet]];
 function go(t){if(CH&&t!=='chart'){CH.chart.remove();CH=null}S.tab=t;document.querySelectorAll('#nav button').forEach(b=>b.classList.toggle('on',b.dataset.t===t));TABS.find(x=>x[0]===t)[2]()}
 $('#nav').innerHTML=TABS.map(x=>`<button data-t="${x[0]}" onclick="go('${x[0]}')">${x[1]}</button>`).join('');go('dash');
-</script></body></html>
+</script><script src="ui.js"></script>
+</body></html>
