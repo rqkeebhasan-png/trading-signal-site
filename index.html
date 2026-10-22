@@ -1,1 +1,166 @@
-<!doctype html><title>Loading</title>
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Signal Desk (SMC)</title>
+<style>
+:root{--bg:#0e1116;--cd:#171b22;--bd:#262c36;--tx:#e6e9ef;--mu:#8b94a3;--g:#2ebd85;--r:#f6465d;--y:#f0b90b}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--tx);font:14px system-ui,sans-serif}
+nav{display:flex;gap:4px;overflow-x:auto;padding:8px;position:sticky;top:0;background:var(--bg);z-index:5;border-bottom:1px solid var(--bd)}
+button,select,input,textarea{font:inherit;color:var(--tx);background:var(--cd);border:1px solid var(--bd);border-radius:8px;padding:7px 10px}
+button{cursor:pointer;white-space:nowrap}button.on{background:#2a3342;border-color:#4a5a78}button:disabled{opacity:.4}
+main{padding:10px;max-width:1000px;margin:auto}.card{background:var(--cd);border:1px solid var(--bd);border-radius:10px;padding:10px;margin:8px 0}
+.mu{color:var(--mu);font-size:12px}.g{color:var(--g)}.r{color:var(--r)}.y{color:var(--y)}
+.tag{display:inline-block;border:1px solid var(--bd);border-radius:6px;padding:1px 6px;margin-left:4px;font-size:12px}
+table{width:100%;border-collapse:collapse}td,th{padding:4px 6px;border-bottom:1px solid var(--bd);text-align:left;font-size:13px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:6px;margin:6px 0}.grid div{background:#10141a;border-radius:6px;padding:6px}
+.warn{border-color:var(--r);color:var(--r)}.ft{padding:12px;text-align:center}input[type=number]{width:100px}textarea{width:100%;min-height:70px}
+#toast{position:fixed;bottom:14px;left:50%;transform:translateX(-50%);background:#2a3342;padding:9px 14px;border-radius:8px;display:none;z-index:9}
+</style></head><body>
+<nav id="nav"></nav><main id="v"></main><div id="toast"></div>
+<div class="ft mu">Not financial advice. Signals are rule-based hypotheses, not predictions; losses are possible. Spot only, no leverage. Use paper trading or very small size first.</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/lightweight-charts/4.1.3/lightweight-charts.standalone.production.js"></script>
+<script>
+const $=s=>document.querySelector(s),LS=(k,d)=>{try{const v=JSON.parse(localStorage.getItem(k));return v==null?d:v}catch(e){return d}},SV=(k,v)=>localStorage.setItem(k,JSON.stringify(v));
+const TFS={'15m':900,'1h':3600,'4h':14400,'12h':43200,'1d':86400,'1w':604800,'1M':2592000};
+const ASSETS=['BTCUSDT','ETHUSDT','BNBUSDT','SOLUSDT','XRPUSDT','PAXGUSDT'],NAMES={PAXGUSDT:'Gold (PAXG)'};
+const nm=s=>NAMES[s]||s.replace('USDT',''),fp=n=>n>=100?n.toFixed(2):n>=1?n.toFixed(4):n.toFixed(6);
+let cfg=Object.assign({pf:1000,risk:1,dd:100,N:3,minRR:2,streak:6,fee:0.1,sun:true,nb:true,halal:true,excl:'',nl:''},LS('cfg',{}));
+let J=LS('journal',[]),ST=LS('state',{reset:0,ack:0}),CH=null;
+const S={tab:'dash',sym:'BTCUSDT',tf:'1h',bias:{},px:{},sigs:[],ov:{sw:1,fvg:1,ob:1,fib:1,sg:1},scanned:0};
+const toast=m=>{const t=$('#toast');t.textContent=m;t.style.display='block';setTimeout(()=>t.style.display='none',3500)};
+const V=h=>{$('#v').innerHTML=h};
+
+/* ---------- DATA (Binance -> Binance mirror -> OKX -> Bybit) ---------- */
+const cache={},gj=async u=>{const r=await fetch(u);if(!r.ok)throw Error(r.status);return r.json()};
+async function klines(sym,tf,limit=500,end){
+ const key=sym+tf+limit+(end||''),h=cache[key];if(h&&Date.now()-h.at<60000)return h.d;
+ const q=`symbol=${sym}&interval=${tf}&limit=${limit}`+(end?`&endTime=${end}`:''),b=sym.replace('USDT','');
+ const okx={'15m':'15m','1h':'1H','4h':'4H','12h':'12H','1d':'1D','1w':'1W','1M':'1M'}[tf],by={'15m':'15','1h':'60','4h':'240','12h':'720','1d':'D','1w':'W','1M':'M'}[tf];
+ const bm=r=>r.map(k=>({t:k[0]/1000,o:+k[1],h:+k[2],l:+k[3],c:+k[4],v:+k[5]}));
+ const tries=[['Binance',()=>gj(`https://data-api.binance.vision/api/v3/klines?${q}`).then(bm)],['Binance',()=>gj(`https://api.binance.com/api/v3/klines?${q}`).then(bm)]];
+ if(!end){tries.push(['OKX',()=>gj(`https://www.okx.com/api/v5/market/candles?instId=${b}-USDT&bar=${okx}&limit=300`).then(j=>bm(j.data.slice().reverse()))]);
+ tries.push(['Bybit',()=>gj(`https://api.bybit.com/v5/market/kline?category=spot&symbol=${sym}&interval=${by}&limit=1000`).then(j=>bm(j.result.list.slice().reverse()))])}
+ for(const [n,f] of tries){try{const d=await f();if(d.length){cache[key]={at:Date.now(),d};S.src=n;return d}}catch(e){}}
+ throw Error('All data sources failed or are blocked on this network');
+}
+const closedC=(c,tf)=>{const l=c[c.length-1];return l&&Date.now()/1000<l.t+TFS[tf]?c.slice(0,-1):c};
+async function hist(sym,tf,n){let all=await klines(sym,tf,1000);while(all.length<n){const e=all[0].t*1000-1;let p;try{p=await klines(sym,tf,1000,e)}catch(x){break}if(!p.length||p[p.length-1].t>=all[0].t)break;all=p.concat(all)}return all}
+
+/* ---------- DETECTORS (pure functions, no lookahead: a swing is only known N candles later) ---------- */
+function swings(c,N){const o=[];for(let i=N;i<c.length-N;i++){let H=1,L=1;for(let k=1;k<=N;k++){if(!(c[i].h>c[i-k].h&&c[i].h>c[i+k].h))H=0;if(!(c[i].l<c[i-k].l&&c[i].l<c[i+k].l))L=0}if(H)o.push({k:'h',p:c[i].h,i,t:c[i].t,conf:i+N});if(L)o.push({k:'l',p:c[i].l,i,t:c[i].t,conf:i+N})}return o}
+function trend(sw){const h=sw.filter(s=>s.k==='h').slice(-2),l=sw.filter(s=>s.k==='l').slice(-2);if(h.length<2||l.length<2)return'range';if(h[1].p>h[0].p&&l[1].p>l[0].p)return'bull';if(h[1].p<h[0].p&&l[1].p<l[0].p)return'bear';return'range'}
+function fvgs(c){const o=[];for(let i=2;i<c.length;i++){const a=c[i-2],d=c[i];let z=null;if(d.l>a.h&&(d.l-a.h)/d.c>0.0005)z={d:1,top:d.l,bot:a.h};else if(d.h<a.l&&(a.l-d.h)/d.c>0.0005)z={d:-1,top:a.l,bot:d.h};if(!z)continue;z.i=i-1;z.t=c[i-1].t;z.s='open';
+ for(let j=i+1;j<c.length;j++){if(z.d>0){if(c[j].l<=z.bot){z.s='filled';break}if(c[j].l<z.top)z.s='partial'}else{if(c[j].h>=z.top){z.s='filled';break}if(c[j].h>z.bot)z.s='partial'}}o.push(z)}return o}
+function mss(c,sw){const ev=[],used=new Set();let pd=0;for(let i=4;i<c.length;i++){const hs=sw.filter(s=>s.k==='h'&&s.conf<i&&!used.has(s)),ls=sw.filter(s=>s.k==='l'&&s.conf<i&&!used.has(s));
+ const body=Math.abs(c[i].c-c[i].o);let ab=0,m=Math.min(14,i);for(let j=i-m;j<i;j++)ab+=Math.abs(c[j].c-c[j].o);ab/=m||1;
+ const hh=hs[hs.length-1],ll=ls[ls.length-1];
+ if(hh&&c[i].c>hh.p){used.add(hh);const lo=ls[ls.length-1];ev.push({d:1,i,t:c[i].t,lvl:hh.p,disp:body>1.3*ab||c[i].l>c[i-2].h,kind:pd===1?'BOS':'MSS',ll:lo||null});pd=1}
+ else if(ll&&c[i].c<ll.p){used.add(ll);const hi=hs[hs.length-1];ev.push({d:-1,i,t:c[i].t,lvl:ll.p,disp:body>1.3*ab||c[i].h<c[i-2].l,kind:pd===-1?'BOS':'MSS',hl:hi||null});pd=-1}}return ev}
+function sweeps(c,sw){const o=[];for(const s of sw){for(let j=s.conf+1;j<c.length;j++){const x=c[j];if(s.k==='l'){if(x.l<s.p){if(x.c>s.p)o.push({k:'ssl',lvl:s.p,i:j,t:x.t});break}}else if(x.h>s.p){if(x.c<s.p)o.push({k:'bsl',lvl:s.p,i:j,t:x.t});break}}}return o}
+function obBull(c,e){const from=e.ll?e.ll.i:Math.max(0,e.i-10);for(let j=e.i-1;j>=from;j--)if(c[j].c<c[j].o)return{top:c[j].h,bot:c[j].l,i:j,t:c[j].t};return null}
+function analyze(c){const sw=swings(c,cfg.N);return{c,sw,tr:trend(sw),fvg:fvgs(c),ev:mss(c,sw),sweeps:sweeps(c,sw)}}
+const bias=a=>a.tr==='bull'?'bullish':a.tr==='bear'?'bearish':'neutral';
+const newsNear=now=>cfg.nb&&cfg.nl.split('\n').some(l=>{const m=l.match(/(\d{4}-\d\d-\d\d)[ T](\d\d:\d\d)/);return m&&Math.abs(new Date(m[1]+'T'+m[2]+':00+06:00')/1000-now)<7200});
+
+/* ---------- SETUP A: discount entry after sweep + MSS (long, spot) ---------- */
+function setupA(a,hb,now,fresh,live){const c=a.c,n=c.length;
+ const e=[...a.ev].reverse().find(x=>x.d>0&&x.disp&&x.ll&&n-1-x.i<=fresh);if(!e)return null;
+ const ob=obBull(c,e),fv=a.fvg.find(z=>z.d>0&&z.i>=e.ll.i&&z.i<=e.i&&z.s!=='filled'),zone=ob||fv;if(!zone)return null;
+ const entry=zone.top,L=e.ll.p;let H=L;for(let j=e.ll.i;j<n;j++)H=Math.max(H,c[j].h);
+ const mid=(L+H)/2,sl=Math.min(L,zone.bot)*0.999;if(entry<=sl)return null;
+ const risk=entry-sl,hs=a.sw.filter(s=>s.k==='h'&&s.p>entry*1.002).map(s=>s.p).sort((x,y)=>x-y),tp1=hs[0]||H,tp2=Math.max(tp1,L+(H-L)*1.618),rr=(tp1-entry)/risk;
+ const sw=a.sweeps.some(s=>s.k==='ssl'&&s.i>=e.ll.i-5&&s.i<=e.i);
+ const checks=[['HTF bias is bullish or neutral ('+hb+')',hb!=='bearish'],['Entry zone in discount (below Fib 0.5)',entry<=mid],['Sell-side liquidity swept before the shift',sw],['LTF market structure shift with displacement',true],['Entry at '+(ob?'order block':'FVG'),true],['Risk-reward at least 1:'+cfg.minRR,rr>=cfg.minRR],['Outside news window',live?!newsNear(now):true],['Not a Sunday session',!(cfg.sun&&new Date(now*1000).getUTCDay()===0)]];
+ return{setup:'A: Discount entry',entry,sl,tp1,tp2,rr,checks,ok:checks.every(x=>x[1]),i:e.i,t:c[e.i].t,bias:hb};}
+function sim(c,s,a,wait=48,hold=96){let f=-1;const risk=s.entry-s.sl;for(let j=a+1;j<c.length;j++){const x=c[j];
+ if(f<0){if(x.c<s.sl)return{st:'Invalidated',j};if(j-a>wait)return{st:'Expired',j};if(x.l<=s.entry){f=j;if(x.l<=s.sl)return{st:'SL hit',f,j,R:-1}}continue}
+ if(x.l<=s.sl)return{st:'SL hit',f,j,R:-1};if(x.h>=s.tp1)return{st:'TP hit',f,j,R:s.rr};if(j-f>=hold)return{st:'Timeout',f,j,R:(x.c-s.entry)/risk}}
+ return{st:f<0?'Watching':f===c.length-1?'Triggered':'Active',f}}
+
+/* ---------- RISK ---------- */
+function size(s){let q=cfg.pf*cfg.risk/100/(s.entry-s.sl);if(q*s.entry>cfg.pf)q=cfg.pf/s.entry;return{q,amt:q*s.entry,loss:q*(s.entry-s.sl)}}
+function locks(){const d=J.filter(t=>t.out),used=Math.max(0,-d.filter(t=>t.at>ST.reset).reduce((a,t)=>a+t.pnl,0));let sk=0;const rec=d.filter(t=>t.at>ST.ack);for(let i=rec.length-1;i>=0&&rec[i].out==='SL';i--)sk++;
+ const day=new Date().toDateString(),tpd=d.some(t=>t.out==='TP'&&new Date(t.at).toDateString()===day),why=[];if(used>=cfg.dd)why.push('Drawdown cap reached ($'+used.toFixed(2)+' of $'+cfg.dd+')');if(sk>=cfg.streak)why.push(sk+' stop losses in a row: pause and review');return{used,sk,tpd,block:why.length>0,why}}
+const excluded=sym=>cfg.halal&&cfg.excl.toUpperCase().split(/[\s,]+/).includes(sym.replace('USDT',''));
+const lockBanner=()=>{const L=locks();return(L.block?`<div class="card warn"><b>New signals blocked.</b> ${L.why.join('; ')}. Reset in Settings after you have reviewed.</div>`:'')+(L.tpd?'<div class="card g">Take-profit hit today: you are done for today.</div>':'')};
+
+/* ---------- SCAN ---------- */
+async function scan(){const out=[];await Promise.all(ASSETS.map(async sym=>{try{const[l,h]=await Promise.all([klines(sym,S.tf,500),klines(sym,'1d',300)]);const a=analyze(closedC(l,S.tf)),hb=bias(analyze(closedC(h,'1d')));S.bias[sym]=hb;S.px[sym]=l[l.length-1].c;
+ const s=setupA(a,hb,Date.now()/1000,40,true);if(s){s.sym=sym;s.tf=S.tf;s.st=sim(a.c,s,s.i).st;out.push(s)}}catch(e){S.bias[sym]='n/a'}}));S.sigs=out.sort((x,y)=>y.t-x.t);S.scanned=1}
+function sigCard(s,i){const z=size(s),L=locks(),ex=excluded(s.sym),n=s.checks.filter(x=>x[1]).length+(s.bias==='bullish'?1:0),conf=n>=9?'High':n>=7?'Medium':'Low';
+ return `<div class="card"><b>${nm(s.sym)}</b> ${s.tf} · ${s.setup}<span class="tag ${s.ok?'g':'y'}">${s.ok?s.st:'Incomplete'}</span><span class="tag">Confidence: ${conf}</span>${ex?'<span class="tag r">Excluded</span>':''}
+ <div class="grid"><div>Entry<br><b>${fp(s.entry)}</b></div><div>Stop<br><b class=r>${fp(s.sl)}</b></div><div>TP1<br><b class=g>${fp(s.tp1)}</b></div><div>TP2<br><b class=g>${fp(s.tp2)}</b></div><div>R:R<br><b>1:${s.rr.toFixed(2)}</b></div></div>
+ <div class="grid"><div>Quantity<br>${z.q.toPrecision(4)}</div><div>Amount<br>$${z.amt.toFixed(2)}</div><div>Loss if SL<br class=r>$${z.loss.toFixed(2)}</div></div>
+ ${s.checks.map(x=>`<div class="${x[1]?'g':'r'}">${x[1]?'✓':'✗'} ${x[0]}</div>`).join('')}
+ <div style="margin-top:8px"><button onclick="S.sym='${s.sym}';S.tf='${s.tf}';go('chart')">Chart</button> <button ${!s.ok||L.block||ex||s.st==='Invalidated'||s.st==='Expired'?'disabled':''} onclick="taken(${i})">Mark taken</button></div></div>`}
+function taken(i){const s=S.sigs[i],z=size(s);J.push({id:Date.now(),sym:s.sym,tf:s.tf,setup:s.setup,entry:s.entry,sl:s.sl,tp1:s.tp1,q:z.q,open:Date.now()});SV('journal',J);toast('Added to Journal as an open trade');go('jr')}
+
+/* ---------- TABS ---------- */
+function clock(){const d=new Date(),h=d.getUTCHours(),on=[['Asia',0,9],['London',7,16],['New York',12,21]].filter(x=>h>=x[1]&&h<x[2]).map(x=>x[0]);return`Dhaka ${d.toLocaleTimeString('en-GB',{timeZone:'Asia/Dhaka',hour:'2-digit',minute:'2-digit'})} · Active: ${on.join(', ')||'none'}${h>=12&&h<16?' · <b class=y>London/NY overlap (peak volume)</b>':''}`}
+async function tDash(){const L=locks(),pct=Math.min(100,L.used/cfg.dd*100);
+ V(`<div class="card mu">${clock()}</div>${lockBanner()}<div class="card">Drawdown used: <b>$${L.used.toFixed(2)}</b> of $${cfg.dd} (${pct.toFixed(0)}%) · losing streak ${L.sk}/${cfg.streak}<div style="height:6px;background:#10141a;border-radius:4px;margin-top:6px"><div style="height:6px;width:${pct}%;background:${pct>70?'var(--r)':'var(--g)'};border-radius:4px"></div></div></div><div class="card" id="wl">Loading watchlist…</div><div id="top"></div>`);
+ if(!S.scanned){try{await scan()}catch(e){}}if(S.tab!=='dash')return;
+ $('#wl').innerHTML=`<b>Watchlist</b> <span class=mu>(1D bias, source: ${S.src||'-'})</span> <button onclick="S.scanned=0;tDash()">Refresh</button><table>${ASSETS.map(a=>`<tr><td><a href="#" onclick="S.sym='${a}';go('chart');return false" style="color:var(--tx)">${nm(a)}</a>${excluded(a)?'<span class="tag r">Excluded</span>':''}</td><td>${S.px[a]?fp(S.px[a]):'-'}</td><td class="${S.bias[a]==='bullish'?'g':S.bias[a]==='bearish'?'r':'mu'}">${S.bias[a]||'-'}</td></tr>`).join('')}</table>`;
+ const ok=S.sigs.filter(s=>s.ok);$('#top').innerHTML='<b>Top signals ('+S.tf+')</b>'+(ok.length?ok.slice(0,3).map(s=>sigCard(s,S.sigs.indexOf(s))).join(''):'<div class="card mu">No setups pass the full checklist right now. That is normal: patience is part of the method.</div>')}
+async function tSigs(){V(lockBanner()+`<div class="card">Timeframe: ${['15m','1h','4h'].map(t=>`<button class="${t===S.tf?'on':''}" onclick="S.tf='${t}';S.scanned=0;tSigs()">${t}</button>`).join(' ')} <label class=mu><input type=checkbox ${S.inc?'checked':''} onchange="S.inc=this.checked;tSigs()"> show incomplete</label></div><div id="sl">Scanning…</div>`);
+ if(!S.scanned){try{await scan()}catch(e){}}if(S.tab!=='sigs')return;const l=S.sigs.map((s,i)=>[s,i]).filter(([s])=>s.ok||S.inc);$('#sl').innerHTML=l.length?l.map(([s,i])=>sigCard(s,i)).join(''):'<div class="card mu">No signals on this timeframe. Spot-only: there are no short signals; a sell means exiting a position you hold.</div>'}
+
+async function tChart(){if(CH){CH.chart.remove();CH=null}
+ V(`<div class="card"><select onchange="S.sym=this.value;tChart()">${ASSETS.map(a=>`<option value=${a} ${a===S.sym?'selected':''}>${nm(a)}</option>`).join('')}</select> ${Object.keys(TFS).map(t=>`<button class="${t===S.tf?'on':''}" onclick="S.tf='${t}';tChart()">${t}</button>`).join(' ')}<div class=mu style="margin-top:6px"><label><input type=checkbox onchange="CH&&CH.chart.priceScale('right').applyOptions({mode:this.checked?1:0})"> Log scale</label> ${[['sw','Swings/MSS'],['fvg','FVG'],['ob','Order blocks'],['fib','Fib'],['sg','Signals']].map(([k,l])=>`<label><input type=checkbox ${S.ov[k]?'checked':''} onchange="S.ov['${k}']=this.checked?1:0;buildOv()"> ${l}</label>`).join(' ')}</div></div><div class="card" id="td">Top-down bias…</div><div style="position:relative"><div id="chart" style="height:420px"></div><canvas id="ov" style="position:absolute;left:0;top:0;pointer-events:none"></canvas></div><div class="mu" id="src"></div>`);
+ if(!window.LightweightCharts){$('#chart').textContent='Chart library failed to load. Check your connection.';return}
+ let raw;try{raw=await klines(S.sym,S.tf,500)}catch(e){$('#chart').textContent=e.message;return}if(S.tab!=='chart')return;
+ const el=$('#chart'),chart=LightweightCharts.createChart(el,{width:el.clientWidth,height:420,layout:{background:{color:'#0e1116'},textColor:'#8b94a3'},grid:{vertLines:{color:'#1b2029'},horzLines:{color:'#1b2029'}},timeScale:{timeVisible:true,borderColor:'#262c36'},rightPriceScale:{borderColor:'#262c36'}});
+ const sr=chart.addCandlestickSeries({upColor:'#2ebd85',downColor:'#f6465d',borderVisible:false,wickUpColor:'#2ebd85',wickDownColor:'#f6465d'});sr.setData(raw);
+ CH={chart,sr,raw,an:analyze(closedC(raw,S.tf)),pl:[],R:[],Ln:[],c0:raw[raw.length-1].c};$('#src').textContent='Source: '+S.src+' · closed candles only are used for detection';buildOv();
+ new ResizeObserver(()=>{if(CH)CH.chart.applyOptions({width:el.clientWidth})}).observe(el);
+ const tfs=['1M','1w','1d','4h','1h','15m'];Promise.all(tfs.map(t=>klines(S.sym,t,300).then(c=>bias(analyze(closedC(c,t)))).catch(()=>'n/a'))).then(b=>{if(S.tab!=='chart')return;const sc=b.reduce((a,x)=>a+(x==='bullish'?1:x==='bearish'?-1:0),0);$('#td').innerHTML='<b>Top-down:</b> '+tfs.map((t,i)=>`<span class="tag ${b[i]==='bullish'?'g':b[i]==='bearish'?'r':''}">${t} ${b[i]}</span>`).join('')+` <span class=mu>alignment ${sc}/6</span>`})}
+function buildOv(){if(!CH)return;const{an,sr}=CH,c=an.c,o=S.ov,M=[],R=[],Ln=[];
+ let ph,pl;const lab=[];for(const s of an.sw){let l;if(s.k==='h'){l=ph?(s.p>ph?'HH':'LH'):'H';ph=s.p}else{l=pl?(s.p>pl?'HL':'LL'):'L';pl=s.p}lab.push([s,l])}
+ if(o.sw){lab.slice(-40).forEach(([s,l])=>M.push({time:s.t,position:s.k==='h'?'aboveBar':'belowBar',shape:s.k==='h'?'arrowDown':'arrowUp',color:s.k==='h'?'#f6465d':'#2ebd85',text:l}));an.ev.slice(-8).forEach(e=>M.push({time:e.t,position:e.d>0?'belowBar':'aboveBar',shape:'circle',color:e.disp?'#f0b90b':'#8b94a3',text:e.kind+(e.disp?'':'?')}))}
+ M.sort((a,b)=>a.time-b.time);sr.setMarkers(M);
+ if(o.fvg)an.fvg.filter(z=>z.s!=='filled').slice(-8).forEach(z=>R.push({t:z.t,top:z.top,bot:z.bot,col:z.d>0?'rgba(46,189,133,.22)':'rgba(246,70,93,.22)'}));
+ if(o.ob)an.ev.filter(e=>e.d>0&&e.disp&&e.ll).slice(-3).forEach(e=>{const b=obBull(c,e);if(b)R.push({t:b.t,top:b.top,bot:b.bot,col:'rgba(80,140,255,.3)'})});
+ const H=[...an.sw].reverse().find(s=>s.k==='h'),L=H&&[...an.sw].reverse().find(s=>s.k==='l'&&s.i<H.i);
+ if(o.fib&&H&&L)[[0,'0'],[.5,'0.5 (below = discount)'],[.75,'0.75'],[1,'1']].forEach(([r,t])=>Ln.push({p:L.p+(H.p-L.p)*r,t:L.t,txt:'fib '+t}));
+ CH.pl.forEach(p=>sr.removePriceLine(p));CH.pl=[];
+ if(o.sg)S.sigs.filter(s=>s.sym===S.sym&&s.tf===S.tf&&s.ok).forEach(s=>[['Entry',s.entry,'#f0b90b'],['SL',s.sl,'#f6465d'],['TP1',s.tp1,'#2ebd85']].forEach(([t,p,col])=>CH.pl.push(sr.createPriceLine({price:p,color:col,lineWidth:1,lineStyle:2,title:t}))));
+ CH.R=R;CH.Ln=Ln;drawOv()}
+function drawOv(){if(!CH||S.tab!=='chart')return;const cv=$('#ov'),el=$('#chart');if(!cv||!el)return;cv.width=el.clientWidth;cv.height=el.clientHeight;const x=cv.getContext('2d'),ts=CH.chart.timeScale(),sr=CH.sr;
+ for(const z of CH.R){let x1=ts.timeToCoordinate(z.t);if(x1===null)x1=0;const y1=sr.priceToCoordinate(z.top),y2=sr.priceToCoordinate(z.bot);if(y1===null||y2===null)continue;x.fillStyle=z.col;x.fillRect(x1,Math.min(y1,y2),cv.width-x1,Math.abs(y2-y1)||1)}
+ x.font='11px system-ui';for(const l of CH.Ln){let x1=ts.timeToCoordinate(l.t);if(x1===null)x1=0;const y=sr.priceToCoordinate(l.p);if(y===null)continue;x.strokeStyle='rgba(240,185,11,.6)';x.setLineDash([4,4]);x.beginPath();x.moveTo(x1,y);x.lineTo(cv.width,y);x.stroke();x.fillStyle='#f0b90b';x.fillText(l.txt,Math.max(x1,4)+4,y-3)}}
+setInterval(()=>{if(S.tab==='chart'&&CH){const k=JSON.stringify([CH.chart.timeScale().getVisibleLogicalRange(),CH.sr.priceToCoordinate(CH.c0),CH.sr.priceToCoordinate(CH.c0*1.1)]);if(k!==CH.k){CH.k=k;drawOv()}}},120);
+
+/* ---------- BACKTEST (no lookahead: each step only sees candles up to i; HTF bias uses closed HTF candles only) ---------- */
+function runBT(c,hc,tf,htf){const tr=[];let busy=-1,hi=-1,hb='neutral';const W=300;
+ for(let i=60;i<c.length-1;i++){if(i<=busy)continue;const T=c[i].t+TFS[tf];let ch=false;while(hi+1<hc.length&&hc[hi+1].t+TFS[htf]<=T){hi++;ch=true}
+ if(ch&&hi>=20)hb=bias(analyze(hc.slice(Math.max(0,hi-250),hi+1)));
+ const ws=Math.max(0,i-W),w=c.slice(ws,i+1),a=analyze(w),s=setupA(a,hb,c[i].t,0,false);if(!s||!s.ok)continue;
+ const r=sim(c.slice(ws),s,w.length-1);if(r.R===undefined)continue;
+ tr.push({t:c[i].t,setup:s.setup,st:r.st,R:r.R-2*(cfg.fee/100)*s.entry/(s.entry-s.sl)});busy=ws+r.j}return tr}
+function stats(t){const n=t.length;let eq=1,pk=1,dd=0;const cv=[1];for(const x of t){eq*=1+cfg.risk/100*x.R;cv.push(eq);pk=Math.max(pk,eq);dd=Math.max(dd,1-eq/pk)}return{n,wr:n?t.filter(x=>x.R>0).length/n:0,ex:n?t.reduce((a,x)=>a+x.R,0)/n:0,dd,eq,cv}}
+const sRow=(l,s)=>`<tr><td>${l}</td><td>${s.n}</td><td>${(s.wr*100).toFixed(0)}%</td><td class="${s.ex>0?'g':'r'}">${s.ex.toFixed(2)}R</td><td>${(s.dd*100).toFixed(1)}%</td><td>${((s.eq-1)*100).toFixed(1)}%</td></tr>`;
+function tBT(){V(`<div class="card"><select id="bs">${ASSETS.map(a=>`<option value=${a}>${nm(a)}</option>`).join('')}</select> <select id="bt"><option>1h<option>4h<option>1d</select> <button onclick="doBT()">Run backtest</button><div class=mu style="margin-top:6px">Replays history with Setup A. Fees ${cfg.fee}% per side. HTF bias from closed daily (or weekly) candles. Entry waits for a retrace to the zone; if SL and TP are both hit in one candle, SL is assumed first.</div></div><div id="bo"></div>`)}
+async function doBT(){const sym=$('#bs').value,tf=$('#bt').value,htf=tf==='1d'?'1w':'1d';$('#bo').innerHTML='<div class="card">Loading history and replaying… (can take several seconds)</div>';await new Promise(r=>setTimeout(r,30));
+ try{const[c,h]=await Promise.all([hist(sym,tf,3000),hist(sym,htf,1000)]),cc=closedC(c,tf),tr=runBT(cc,closedC(h,htf),tf,htf),cut=Math.floor(tr.length*.7),a=stats(tr),W=a.cv,mx=Math.max(...W),mn=Math.min(...W);
+ const pts=W.map((v,i)=>`${(i/(W.length-1||1)*300).toFixed(1)},${(100-(v-mn)/((mx-mn)||1)*100).toFixed(1)}`).join(' ');
+ $('#bo').innerHTML=`<div class="card ${tr.length<30?'warn':''}">${cc.length} candles tested. ${tr.length<30?'<b>Small sample ('+tr.length+' trades): do not trust these numbers.</b>':'Sample size is moderate; past results do not guarantee future results.'}</div><div class="card"><table><tr><th></th><th>Trades</th><th>Win</th><th>Expectancy</th><th>Max DD</th><th>Return</th></tr>${sRow('All',a)}${sRow('First 70% (tuning)',stats(tr.slice(0,cut)))}${sRow('Last 30% (hold-out)',stats(tr.slice(cut)))}</table><div class=mu>Avg R:R of winners ${(tr.filter(x=>x.R>0).reduce((s,x)=>s+x.R,0)/(tr.filter(x=>x.R>0).length||1)).toFixed(2)} · risk ${cfg.risk}% per trade compounded</div></div><div class="card"><b>Equity curve</b><svg viewBox="0 0 300 100" style="width:100%;height:120px"><polyline fill="none" stroke="#2ebd85" stroke-width="1.5" points="${pts}"/></svg></div><div class="card"><table><tr><th>Date</th><th>Result</th><th>R</th></tr>${tr.slice(-30).reverse().map(x=>`<tr><td>${new Date(x.t*1000).toISOString().slice(0,16).replace('T',' ')}</td><td>${x.st}</td><td class="${x.R>0?'g':'r'}">${x.R.toFixed(2)}</td></tr>`).join('')}</table></div>`}catch(e){$('#bo').innerHTML='<div class="card warn">'+e.message+'</div>'}}
+
+/* ---------- JOURNAL ---------- */
+function closeT(id,out){const t=J.find(x=>x.id===id);t.out=out;t.at=Date.now();t.pnl=out==='TP'?t.q*(t.tp1-t.entry):out==='SL'?-t.q*(t.entry-t.sl):0;SV('journal',J);tJr()}
+function editT(id){const t=J.find(x=>x.id===id),n=prompt('Notes / screenshot link',t.note||'');if(n===null)return;const m=prompt('Mistakes (comma separated: FOMO, no SL, ignored HTF, revenge trade)',(t.mist||[]).join(', '));t.note=n;t.mist=(m||'').split(',').map(x=>x.trim()).filter(Boolean);SV('journal',J);tJr()}
+function tJr(){const op=J.filter(t=>!t.out),dn=J.filter(t=>t.out).reverse(),mo={},mi={};for(const t of dn){const k=new Date(t.at).toISOString().slice(0,7);mo[k]=mo[k]||{n:0,w:0,p:0};mo[k].n++;mo[k].w+=t.pnl>0?1:0;mo[k].p+=t.pnl;(t.mist||[]).forEach(m=>mi[m]=(mi[m]||0)+1)}
+ V(lockBanner()+`<div class="card"><b>Open trades</b>${op.length?op.map(t=>`<div style="margin:6px 0">${nm(t.sym)} ${t.tf} entry ${fp(t.entry)} SL ${fp(t.sl)} TP ${fp(t.tp1)} <button onclick="closeT(${t.id},'TP')">TP hit</button> <button onclick="closeT(${t.id},'SL')">SL hit</button> <button onclick="closeT(${t.id},'BE')">Break-even</button></div>`).join(''):'<div class=mu>None. Mark a signal as taken to log it here.</div>'}</div>
+ <div class="card"><b>Monthly stats</b><table>${Object.keys(mo).sort().reverse().map(k=>`<tr><td>${k}</td><td>${mo[k].n} trades</td><td>${(mo[k].w/mo[k].n*100).toFixed(0)}% win</td><td class="${mo[k].p>=0?'g':'r'}">$${mo[k].p.toFixed(2)}</td></tr>`).join('')||'<tr><td class=mu>No closed trades yet</td></tr>'}</table><div class=mu>Mistakes: ${Object.entries(mi).map(([k,v])=>k+' ×'+v).join(', ')||'none tagged'}</div></div>
+ <div class="card"><b>Closed</b><table>${dn.map(t=>`<tr><td>${new Date(t.at).toISOString().slice(0,10)}</td><td>${nm(t.sym)}</td><td class="${t.pnl>0?'g':t.pnl<0?'r':''}">${t.out} $${t.pnl.toFixed(2)}</td><td class=mu>${t.note||''}</td><td><button onclick="editT(${t.id})">Edit</button></td></tr>`).join('')}</table></div>`)}
+
+/* ---------- SETTINGS ---------- */
+function tSet(){const f=(k,l,ty='number',st='')=>`<label style="display:block;margin:6px 0">${l}<br><input id="s_${k}" type="${ty}" ${st} ${ty==='checkbox'?(cfg[k]?'checked':''):'value="'+cfg[k]+'"'}></label>`;
+ V(`<div class="card">${f('pf','Portfolio size ($)')}${f('risk','Max risk per trade (%)','number','step=0.1')}${f('dd','Max total drawdown ($): signals blocked when reached')}${f('streak','Pause after N consecutive stop losses')}${f('minRR','Minimum risk-reward','number','step=0.1')}${f('N','Swing sensitivity N (candles each side)')}${f('fee','Fee per side (%)','number','step=0.01')}${f('sun','Avoid Sunday sessions','checkbox')}${f('nb','Block signals near news','checkbox')}${f('halal','Halal filter: spot only, no leverage, no shorts, hide excluded coins','checkbox')}
+ <label>Excluded coins (symbols like SOL, ADA). Fill this from the report you trust and verify with a scholar.<br><textarea id="s_excl">${cfg.excl}</textarea></label><label>High-impact news, one per line, Dhaka time: <code>2026-11-12 19:30 CPI</code><br><textarea id="s_nl">${cfg.nl}</textarea></label><button onclick="saveSet()">Save</button></div>
+ <div class="card"><button onclick="ST.reset=Date.now();SV('state',ST);toast('Drawdown period reset')">Reset drawdown period</button> <button onclick="ST.ack=Date.now();SV('state',ST);toast('Streak acknowledged')">I reviewed my losing streak</button> <button onclick="selfTest()">Run no-lookahead test</button> <button onclick="exportJ()">Export journal</button></div>`)}
+function saveSet(){for(const k of Object.keys(cfg)){const e=$('#s_'+k);if(!e)continue;cfg[k]=e.type==='checkbox'?e.checked:e.type==='number'?+e.value:e.value}SV('cfg',cfg);S.scanned=0;toast('Saved')}
+async function selfTest(){try{const c=await klines('BTCUSDT','1h',500),full=swings(c,cfg.N);let bad=0;for(const k of [150,250,350,450])if(JSON.stringify(swings(c.slice(0,k),cfg.N))!==JSON.stringify(full.filter(s=>s.conf<k)))bad++;toast(bad?'Lookahead test FAILED':'No-lookahead test passed: truncating future candles changes nothing')}catch(e){toast(e.message)}}
+function exportJ(){const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([JSON.stringify({cfg,J,ST},null,1)],{type:'application/json'}));a.download='signal-desk-backup.json';a.click()}
+
+/* ---------- ROUTER ---------- */
+const TABS=[['dash','Dashboard',tDash],['chart','Chart',tChart],['sigs','Signals',tSigs],['bt','Backtest',tBT],['jr','Journal',tJr],['set','Settings',tSet]];
+function go(t){if(CH&&t!=='chart'){CH.chart.remove();CH=null}S.tab=t;document.querySelectorAll('#nav button').forEach(b=>b.classList.toggle('on',b.dataset.t===t));TABS.find(x=>x[0]===t)[2]()}
+$('#nav').innerHTML=TABS.map(x=>`<button data-t="${x[0]}" onclick="go('${x[0]}')">${x[1]}</button>`).join('');go('dash');
+</script></body></html>
